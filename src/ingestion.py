@@ -83,6 +83,8 @@ def get_status() -> dict:
 
 def run_ingestion(
     limit: int | None = None,
+    offset: int = 0,
+    append: bool = False,
     index_dir: Path | None = None,
 ) -> dict:
     """Run the full ingestion pipeline.
@@ -91,7 +93,10 @@ def run_ingestion(
     text-embedding-3-large model, builds a VectorStoreIndex, and persists it.
 
     Args:
-        limit: If set, ingest only the first N passages. Useful for testing.
+        limit: If set, ingest only N passages starting from *offset*.
+        offset: Row offset into the passages dataset (default 0).
+        append: If True and a persisted index already exists, add the new
+            documents to the existing index instead of rebuilding from scratch.
         index_dir: Override the default index persistence directory. Useful for
             testing — avoids writing into the production index directory.
 
@@ -109,29 +114,38 @@ def run_ingestion(
         if _state["status"] == "ingesting":
             raise RuntimeError("Ingestion already in progress.")
         _state["status"] = "ingesting"
-        _state["passage_count"] = 0
 
     try:
         df = load_passages()
-        if limit is not None:
-            df = df.head(limit)
+        df = df.iloc[offset: offset + limit] if limit is not None else df.iloc[offset:]
 
         documents = passages_to_documents(df)
         embed_model = get_text_embedding_3_large()
 
-        index = VectorStoreIndex.from_documents(
-            documents,
-            embed_model=embed_model,
-            show_progress=True,
-        )
-
         target_dir.mkdir(parents=True, exist_ok=True)
+
+        if append and target_dir.exists() and any(target_dir.iterdir()):
+            # Load existing persisted index and insert new documents
+            storage_context = StorageContext.from_defaults(persist_dir=str(target_dir))
+            index = load_index_from_storage(storage_context, embed_model=embed_model)
+            for doc in documents:
+                index.insert(doc)
+        else:
+            index = VectorStoreIndex.from_documents(
+                documents,
+                embed_model=embed_model,
+                show_progress=True,
+            )
+
         index.storage_context.persist(persist_dir=str(target_dir))
+
+        # Use docstore node count as the true total (covers append case)
+        total_count = len(index.docstore.docs)
 
         with _lock:
             _index = index
             _state["status"] = "ready"
-            _state["passage_count"] = len(df)
+            _state["passage_count"] = total_count
             _state["index_path"] = str(target_dir)
 
     except Exception:
@@ -167,19 +181,21 @@ router = APIRouter(tags=["ingestion"])
 
 
 @router.post("/ingest")
-def ingest_endpoint(limit: int | None = None):
+def ingest_endpoint(limit: int | None = None, offset: int = 0, append: bool = False):
     """Trigger the ingestion pipeline.
 
     Downloads passages from HuggingFace, generates embeddings via the controlled
     Azure text-embedding-3-large model, and persists the vector index to disk.
 
-    Use `?limit=N` to ingest only N passages — recommended during development
-    and testing to keep run times short and Azure API usage low.
+    - `?limit=N` — ingest only N passages (recommended during development).
+    - `?offset=K` — start from the K-th passage in the dataset.
+    - `?append=true` — add the new passages to the existing index instead of
+      rebuilding from scratch, useful for incremental ingestion.
 
     Returns 409 if ingestion is already running.
     """
     try:
-        return run_ingestion(limit=limit)
+        return run_ingestion(limit=limit, offset=offset, append=append)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
