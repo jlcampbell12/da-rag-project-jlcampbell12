@@ -121,7 +121,13 @@ def embed_endpoint(query: str):
     is used for both ingestion and query-time embedding.
     Returns the vector dimensionality alongside the embedding values.
     """
-    vector = embed_query(query)
+    try:
+        vector = embed_query(query)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Embedding model unavailable: {exc}",
+        )
     return {
         "query": query,
         "dimensions": len(vector),

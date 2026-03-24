@@ -73,10 +73,11 @@ def test_retrieve_endpoint_exists(client):
 
 
 def test_embed_endpoint_exists(client):
-    """POST /embed must exist regardless of Azure auth state."""
+    """POST /embed must exist (not 404/405) regardless of Azure auth state.
+    Without auth it returns 503; with auth it returns 200.
+    """
     response = client.post("/embed?query=hello")
-    assert response.status_code != 404
-    assert response.status_code != 405
+    assert response.status_code not in (404, 405)
 
 
 # ── Azure integration tests (require auth + ingested index) ──────────────────
